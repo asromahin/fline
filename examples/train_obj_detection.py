@@ -15,25 +15,24 @@ import json
 
 import albumentations as alb
 
-from cftcvpipeline.pipelines.base_pipeline import BasePipeline
+from fline.pipelines.base_pipeline import BasePipeline
 
-from cftcvpipeline.utils.logging.trains.logger import TrainsLogger
-from cftcvpipeline.utils.saver import Saver, MetricStrategies
-from cftcvpipeline.utils.data.dataset import BaseDataset
+from fline.utils.logging.trains import TrainsLogger
+from fline.utils.saver import Saver, MetricStrategies
+from fline.utils.data.dataset import BaseDataset
 
-from cftcvpipeline.constants.base import IMAGE
+from fline.utils.wrappers import ModelWrapper, DataWrapper
+from fline.utils.logging.base import EnumLogDataTypes
 
-from cftcvpipeline.utils.wrappers import ModelWrapper, DataWrapper
-from cftcvpipeline.utils.logging.base import EnumLogDataTypes
+from fline.utils.logging.groups import ProcessImage
 
-from cftcvpipeline.utils.logging.trains.groups import ProcessImage
+from fline.utils.data.image.io import imread_padding
 
-from cftcvpipeline.utils.data.image.io import imread_padding
-
-from cftcvpipeline.models.research.connected_model import ConnectLossV3
-from cftcvpipeline.models.research.object_detection_model import BboxLoss, ObjectDetectionModelV3
+from fline.models.models.research.object_detection_model import ObjectDetectionModel
+from fline.losses.research.bbox import BboxLoss
 
 from sklearn.model_selection import train_test_split
+from torch.utils.data._utils.collate import default_collate
 
 
 os.environ['TORCH_HOME'] = '/home/ds'
@@ -42,13 +41,14 @@ os.environ['NO_PROXY'] = 'koala03.ftc.ru'
 os.environ['no_proxy'] = 'koala03.ftc.ru'
 
 
-SHAPE = (512, 512)
+SHAPE = (256, 256)
 PROECT_NAME = '[RESEARCH]ObjectDetection'
-TASK_NAME = 'test_deep_vector'
+TASK_NAME = 'test_deep_vector_new_loss'
 SEG_MODEL = 'seg_model'
 MASK = 'mask'
 BBOX = 'bbox'
-DEVICE = 'cuda:1'
+DEVICE = 'cuda:2'
+IMAGE = 'IMAGE'
 
 
 df = pd.read_csv(os.path.join(DATASET_DIR, 'dataset_v93.csv'))
@@ -137,6 +137,8 @@ def generate_get_bboxes(mode='train'):
     def get_bboxes(row, res_dict):
         im = imread_padding(row[IMAGE], 64, 0).astype('uint8')
         mask = imread_padding(row[MASK], 64, 0).astype('uint8')
+        im = cv2.resize(im, SHAPE)
+        mask = cv2.resize(mask, SHAPE)
         mask = mask[:, :, 2:3]
         r_mask = np.zeros(mask.shape, dtype='int')
         last_i = 1
@@ -160,11 +162,27 @@ def generate_get_bboxes(mode='train'):
         mask = r_mask
         bboxes = torch.tensor(bboxes, dtype=torch.float32)
         im = im.astype('float32')
+        #mask = cv2.resize(mask, SHAPE)
         res_dict[IMAGE] = ToTensor()((im / 255).astype('float32'))
         res_dict[BBOX] = bboxes
         res_dict[MASK] = ToTensor()(mask.astype('float32'))
         return res_dict
     return get_bboxes
+
+
+def collate_fn(batch):
+    max_size = max([b[BBOX].shape[0] for b in batch])
+    for i, b in enumerate(batch):
+        old_size = b[BBOX].shape[0]
+        if old_size != max_size:
+            buf = torch.zeros((max_size, b[BBOX].shape[1]))
+            buf[:b[BBOX].shape[0]] = b[BBOX]
+            batch[i][BBOX] = buf
+    res_batch = default_collate(batch)
+    #[print(k, res_batch[k].shape) for k in res_batch.keys()]
+    return res_batch
+
+
 
 
 train_dataset = BaseDataset(
@@ -183,15 +201,17 @@ val_dataset = BaseDataset(
 )
 train_loader = DataLoader(
     dataset=train_dataset,
-    batch_size=1,
+    batch_size=8,
     num_workers=4,
     shuffle=True,
+    collate_fn=collate_fn,
 )
 val_loader = DataLoader(
     dataset=val_dataset,
-    batch_size=1,
+    batch_size=8,
     num_workers=4,
     shuffle=False,
+    collate_fn=collate_fn,
 )
 
 
@@ -205,19 +225,15 @@ def log_connected(data):
             res = torch.cat([res, d[:,i:i+1,:,:]], dim=2)
     return res
 
-class AgregateLoss(torch.nn.Module):
-    def __init__(self, device):
-        super(AgregateLoss, self).__init__()
-        self.bbox_loss = BboxLoss(device)
-        self.connect_loss = ConnectLossV3(device)
-    def forward(self, bbox_pred, bbox_target, mask_pred, mask_target):
-        return self.bbox_loss(bbox_pred, bbox_target) + self.connect_loss(mask_pred, mask_target)
 
 pipeline = BasePipeline(
     train_loader=train_loader,
     val_loader=val_loader,
     models={SEG_MODEL: ModelWrapper(
-        model=ObjectDetectionModelV3('efficientnet_b0', last_features=64, connected_channels=32),
+        model=ObjectDetectionModel(
+            'efficientnet_b0',
+            features_block=None,
+        ),
         keys=[
             ([IMAGE], ['bboxes', 'conn']),
         ],
@@ -228,9 +244,9 @@ pipeline = BasePipeline(
     )},
     losses=[
         DataWrapper(
-            AgregateLoss(DEVICE),
+            BboxLoss(DEVICE),
             keys=[
-                (['bboxes', BBOX, 'conn', MASK], ['loss'])
+                (['bboxes', BBOX], ['loss'])
             ],
         ),
     ],

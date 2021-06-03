@@ -17,22 +17,25 @@ import cv2
 import numpy as np
 import json
 
+import segmentation_models_pytorch as smp
 import albumentations as alb
 import timm
 
 
-from cftcvpipeline.pipelines.base_pipeline import BasePipeline
+from fline.pipelines.base_pipeline import BasePipeline
 
-from cftcvpipeline.utils.logging.trains.logger import TrainsLogger
-from cftcvpipeline.utils.saver import Saver, MetricStrategies
-from cftcvpipeline.utils.data.dataset import BaseDataset
+from fline.utils.logging.trains import TrainsLogger
+from fline.utils.saver import Saver, MetricStrategies
+from fline.utils.data.dataset import BaseDataset
+from fline.utils.data.callbacks.base import generate_imread_callback
 
-from cftcvpipeline.constants.base import IMAGE
+from fline.utils.wrappers import ModelWrapper, DataWrapper
+from fline.utils.logging.base import EnumLogDataTypes
 
-from cftcvpipeline.utils.wrappers import ModelWrapper, DataWrapper
-from cftcvpipeline.utils.logging.base import EnumLogDataTypes
+from fline.utils.logging.groups import ConcatImage, ProcessImage
 
-from cftcvpipeline.utils.data.image.io import imread
+from fline.utils.data.image.io import imread_padding, imread_resize, imread
+
 
 from sklearn.model_selection import train_test_split
 
@@ -45,11 +48,12 @@ os.environ['no_proxy'] = 'koala03.ftc.ru'
 
 SHAPE = (512, 512)
 PROECT_NAME = '[SARA]DocFake'
-TASK_NAME = 'test_with_generator_v2'
+TASK_NAME = 'test_with_generator_v3_with_augs'
 SEG_MODEL = 'seg_model'
 MASK = 'mask'
 FAKE_IMAGE = 'fake_image'
-DEVICE = 'cuda:0'
+DEVICE = 'cuda:2'
+IMAGE = 'IMAGE'
 
 
 df = pd.read_csv(os.path.join(DATASET_DIR, 'dataset_v93.csv'))
@@ -178,7 +182,9 @@ def get_mapping_mask(mask, ocr_rows):
     return res
 
 
-dg = DocGenerator(-1)
+dg = DocGenerator(
+    -1,
+)
 
 
 def generate_get_images(mode='train'):
@@ -196,14 +202,13 @@ def generate_get_images(mode='train'):
         except:
             r = im
 
-        res_dict[IMAGE] = ToTensor()((im / 255).astype('float32'))
-        res_dict['true'] = 0
+        res_dict['label'] = 1
         if np.abs(im - r).max() == 0:
-            res_dict[FAKE_IMAGE] = ToTensor()((r / 255).astype('float32'))
-            res_dict['fake'] = 1
-        else:
-            res_dict[FAKE_IMAGE] = res_dict[IMAGE]
-            res_dict['fake'] = 0
+            res_dict['label'] = 0
+        if mode == 'train':
+            r = train_augs_geometric(image=r)['image']
+            r = train_augs_values(image=r)['image']
+        res_dict[IMAGE] = ToTensor()((r / 255).astype('float32'))
         return res_dict
     return get_images
 
@@ -249,10 +254,9 @@ pipeline = BasePipeline(
     train_loader=train_loader,
     val_loader=val_loader,
     models={SEG_MODEL: ModelWrapper(
-        model=timm.create_model('efficientnet_b0', num_classes=2),
+        model=timm.create_model('efficientnet_b0', num_classes=1),
         keys=[
-            #([IMAGE], ['out1']),
-            ([FAKE_IMAGE], ['out']),
+            ([IMAGE], ['out']),
         ],
         optimizer=torch.optim.Adam,
         optimizer_kwargs={
@@ -261,9 +265,9 @@ pipeline = BasePipeline(
     )},
     losses=[
         DataWrapper(
-            torch.nn.CrossEntropyLoss(),
+            torch.nn.BCELoss(),
             keys=[
-                (['out', 'fake'], ['loss'])
+                (['out', 'label'], ['loss'])
             ],
         ),
     ],
@@ -275,9 +279,10 @@ pipeline = BasePipeline(
         #     ],
         # ),
         DataWrapper(
-            lambda out, true: (out.argmax(dim=-1) == true).sum()/out.shape[0],
+            #lambda out, true: (out.argmax(dim=-1) == true).sum()/out.shape[0],
+            lambda out, true: ((out > 0.5) == true).sum()/out.shape[0],
             keys=[
-                (['out', 'fake'], ['acc'])
+                (['out', 'label'], ['acc'])
             ],
         ),
     ],
@@ -287,10 +292,8 @@ pipeline = BasePipeline(
         log_each_epoch=True,
         log_keys={
             'loss': EnumLogDataTypes.loss,
-            #IMAGE: EnumLogDataTypes.image,
-            FAKE_IMAGE: EnumLogDataTypes.image,
+            IMAGE: EnumLogDataTypes.image,
             'acc': EnumLogDataTypes.metric,
-            #'acc2': EnumLogDataTypes.metric,
         },
         project_name=PROECT_NAME,
         task_name=TASK_NAME,

@@ -30,25 +30,50 @@ class ResidualBlock(torch.nn.Module):
         return out
 
 
+class SimpleConvBlock(torch.nn.Module):
+    def __init__(
+            self,
+            in_channels,
+            out_channels,
+            kernel_size=3,
+            padding=1,
+    ):
+        super(SimpleConvBlock, self).__init__()
+
+        self.conv = torch.nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            stride=1,
+        )
+        self.conv2 = ResidualBlock(out_channels, out_channels)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.conv2(x)
+        return x
+
+
 class SimpleUpConvBlock(torch.nn.Module):
     def __init__(
             self,
-            in_features,
-            out_features,
+            in_channels,
+            out_channels,
             kernel_size,
             padding,
     ):
         super(SimpleUpConvBlock, self).__init__()
 
         self.conv = torch.nn.ConvTranspose2d(
-            in_features,
-            out_features,
+            in_channels,
+            out_channels,
             kernel_size=kernel_size,
             padding=padding,
             stride=2,
             output_padding=1,
         )
-        self.conv2 = ResidualBlock(out_features, out_features)
+        self.conv2 = ResidualBlock(out_channels, out_channels)
         # self.uppool = torch.nn.Upsample(scale_factor=2)
 
     def forward(self, x):

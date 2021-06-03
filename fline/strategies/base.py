@@ -69,7 +69,7 @@ class BaseStrategy:
         self.metrics = metrics
         self.loss_reduce = loss_reduce
 
-    def forward(self, data, is_train=True):
+    def __call__(self, data, is_train=True):
         return base_strategy(
             data,
             is_train=is_train,
@@ -83,7 +83,7 @@ class BaseStrategy:
 class StageStrategy(BaseStrategy):
     def __init__(
             self,
-            stages: tp.List[tp.Mapping[str, tp.Tuple[tp.List, tp.List]]],
+            stages: tp.List[tp.List[tp.Mapping[str, tp.Tuple[tp.List, tp.List]]]],
     ):
         super(StageStrategy, self).__init__()
         self.stages = stages

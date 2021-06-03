@@ -4,9 +4,6 @@ import torch
 def iou_dots(pr, gt, device, eps=1e-7):
     #   (batch_size, 4) x_center, y_center, w, h,score
 
-    area_pred = pr[:, 2] * pr[:, 3]
-    area_gt = gt[:, 2] * gt[:, 3]
-
     x_min_true = gt[:, 0:1] - gt[:, 2:3] / 2
     x_max_true = gt[:, 0:1] + gt[:, 2:3] / 2
     y_min_true = gt[:, 1:2] - gt[:, 3:4] / 2
@@ -28,16 +25,27 @@ def iou_dots(pr, gt, device, eps=1e-7):
     overlap_3 = torch.min(torch.cat([y_max_true, y_max_pred], dim=-1), dim=-1)[0]
 
     # возвращаем разницу между векторами, если прямоугольники не пересекаются
-    if overlap_2 < overlap_0 or overlap_3 < overlap_1:
-        return -torch.nn.functional.mse_loss(pr, gt)
+    mask1 = overlap_2 < overlap_0
+    mask2 = overlap_3 < overlap_1
+    incorrect_mask = mask1 | mask2
+    mse_loss = -torch.nn.functional.mse_loss(pr[incorrect_mask], gt[incorrect_mask], reduction='mean')
+    if (~incorrect_mask).sum() == 0:
+        return mse_loss
+    if (incorrect_mask).sum() == 0:
+        mse_loss = 0
 
+    area_pred = (pr[:, 2] * pr[:, 3])[~incorrect_mask]
+    area_gt = (gt[:, 2] * gt[:, 3])[~incorrect_mask]
     # intersection area
-    intersection = ((overlap_2 - overlap_0) * (overlap_3 - overlap_1)).sum()
-    return (intersection / (area_pred + area_gt - intersection + eps)).mean()
+    intersection = (overlap_2[~incorrect_mask] - overlap_0[~incorrect_mask]) * (overlap_3[~incorrect_mask] - overlap_1[~incorrect_mask])
+    #print(intersection.shape, area_pred.shape, area_gt.shape)
+    res = (intersection / (area_pred + area_gt - intersection + eps)).mean() + mse_loss
+    return res
 
 
 class IouDots(torch.nn.Module):
     def __init__(self, device):
+        super(IouDots, self).__init__()
         self.metric = iou_dots
         self.device = device
 

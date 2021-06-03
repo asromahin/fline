@@ -19,21 +19,30 @@ import json
 
 import segmentation_models_pytorch as smp
 import albumentations as alb
+import timm
 
-from cftcvpipeline.pipelines.base_pipeline import BasePipeline
 
-from cftcvpipeline.utils.logging.trains.logger import TrainsLogger
-from cftcvpipeline.utils.saver import Saver, MetricStrategies
-from cftcvpipeline.utils.data.dataset import BaseDataset
+from fline.pipelines.base_pipeline import BasePipeline
 
-from cftcvpipeline.constants.base import IMAGE
+from fline.utils.logging.trains import TrainsLogger
+from fline.utils.saver import Saver, MetricStrategies
+from fline.utils.data.dataset import BaseDataset
+from fline.utils.data.callbacks.base import generate_imread_callback
 
-from cftcvpipeline.utils.wrappers import ModelWrapper, DataWrapper
-from cftcvpipeline.utils.logging.base import EnumLogDataTypes
+from fline.utils.wrappers import ModelWrapper, DataWrapper
+from fline.utils.logging.base import EnumLogDataTypes
 
-from cftcvpipeline.utils.data.image.io import imread
+from fline.utils.logging.groups import ConcatImage, ProcessImage
+
+from fline.utils.data.image.io import imread_padding, imread_resize, imread
+
+from fline.models.models.segmentation.fpn import TimmFPN
+from fline.models.models.segmentation.unet import TimmUnet
 
 from sklearn.model_selection import train_test_split
+
+from fline.losses.segmentation.dice import BCEDiceLoss
+from fline.metrics.segmentation.segmentation import iou
 
 
 os.environ['TORCH_HOME'] = '/home/ds'
@@ -42,132 +51,21 @@ os.environ['NO_PROXY'] = 'koala03.ftc.ru'
 os.environ['no_proxy'] = 'koala03.ftc.ru'
 
 
-SHAPE = (512, 512)
+SHAPE = (256, 256)
 PROECT_NAME = '[SARA]DocFake'
-TASK_NAME = 'segmentation_fake'
+TASK_NAME = 'segmentation_fake_v3'
 SEG_MODEL = 'seg_model'
 MASK = 'mask'
+IMAGE = 'IMAGE'
 FAKE_IMAGE = 'fake_image'
-DEVICE = 'cuda:2'
-
-
-def iou(pr, gt, eps=1e-7, threshold=None, activation=None):
-    """
-    Source:
-        https://github.com/catalyst-team/catalyst/
-    Args:
-        pr (torch.Tensor): A list of predicted elements
-        gt (torch.Tensor):  A list of elements that are to be predicted
-        eps (float): epsilon to avoid zero division
-        threshold: threshold for outputs binarization
-    Returns:
-        float: IoU (Jaccard) score
-    """
-
-    if activation is None or activation == "none":
-        activation_fn = lambda x: x
-    elif activation == "sigmoid":
-        activation_fn = torch.nn.Sigmoid()
-    elif activation == "softmax2d":
-        activation_fn = torch.nn.Softmax2d()
-    else:
-        raise NotImplementedError(
-            "Activation implemented for sigmoid and softmax2d"
-        )
-
-    pr = activation_fn(pr)
-
-    if threshold is not None:
-        pr = (pr > threshold).float()
-
-    gt = gt.view(gt.shape[0], gt.shape[1], -1)
-    pr = pr.view(pr.shape[0], pr.shape[1], -1)
-
-    intersection = torch.sum(gt * pr, dim=2)
-    union = torch.sum(gt, dim=2) + torch.sum(pr, dim=2) - intersection + eps
-    return (intersection + eps) / union
-
-
-def f_score(pr, gt, beta=1, eps=1e-7, threshold=None, activation='sigmoid'):
-    """
-    Args:
-        pr (torch.Tensor): A list of predicted elements
-        gt (torch.Tensor):  A list of elements that are to be predicted
-        beta (float): positive constant
-        eps (float): epsilon to avoid zero division
-        threshold: threshold for outputs binarization
-    Returns:
-        float: F score
-    """
-
-    if activation is None or activation == "none":
-        activation_fn = lambda x: x
-    elif activation == "sigmoid":
-        activation_fn = torch.nn.Sigmoid()
-    elif activation == "softmax2d":
-        activation_fn = torch.nn.Softmax2d()
-    else:
-        raise NotImplementedError(
-            "Activation implemented for sigmoid and softmax2d"
-        )
-
-    pr = activation_fn(pr)
-
-    if threshold is not None:
-        pr = (pr > threshold).float()
-
-    tp = torch.sum(gt * pr)
-    fp = torch.sum(pr) - tp
-    fn = torch.sum(gt) - tp
-
-    score = ((1 + beta ** 2) * tp + eps) \
-            / ((1 + beta ** 2) * tp + beta ** 2 * fn + fp + eps)
-
-    return score
-
-
-class DiceLoss(torch.nn.Module):
-    __name__ = 'dice_loss'
-
-    def __init__(self, eps=1e-7, activation='sigmoid'):
-        super().__init__()
-        self.activation = activation
-        self.eps = eps
-
-    def forward(self, y_pr, y_gt):
-        return 1 - f_score(y_pr, y_gt, beta=1., eps=self.eps, threshold=None, activation=self.activation)
-
-
-class BCELoss(torch.nn.Module):
-    __name__ = 'bce_loss'
-
-    def __init__(self):
-        super().__init__()
-        self.bce = torch.nn.BCEWithLogitsLoss(reduction='mean')
-
-    def forward(self, y_pr, y_gt):
-        bce = self.bce(y_pr, y_gt)
-        return bce
-
-
-class BCEDiceLoss(DiceLoss):
-    __name__ = 'bce_dice_loss'
-
-    def __init__(self, eps=1e-7, activation='sigmoid'):
-        super().__init__(eps, activation)
-        self.bce = BCELoss()
-
-    def forward(self, y_pr, y_gt):
-        dice = super().forward(y_pr, y_gt)
-        bce = self.bce(y_pr, y_gt)
-        return dice + bce
+DEVICE = 'cuda:0'
 
 df = pd.read_csv(os.path.join(DATASET_DIR, 'dataset_v93.csv'))
 df[IMAGE] = df['image'].str.replace(SRC_IMAGES_PREFIX, DST_IMAGES_PREFIX)
 df[MASK] = df['annotation'].str.replace(SRC_MASKS_PREFIX, DST_MASKS_PREFIX) + '.png'
 
 df['original_image'] = df['image'].str.split('/').str[-3]
-#df = df.iloc[500:700]
+df = df.iloc[500:700]
 
 
 def add_classes(df):
@@ -222,7 +120,9 @@ ocr_groups = ocr_df.groupby('original_image')
 
 valid_images = list(ocr_df['original_image'].unique())
 
+print(len(df))
 df = df[df['original_image'].str.contains('|'.join(valid_images))]
+print(len(df))
 
 LABELS = [
     "void",
@@ -282,17 +182,43 @@ def get_mapping_mask(mask, ocr_rows):
                         res_mask = (conn == c).astype('uint8')
                         cntrs, _ = cv2.findContours(res_mask, 0, 1)
                         text = ocr_rows[ocr_rows['field'] == cur_key]
-
+                        #print(len(text), len(cntrs))
                         if len(text) == 1 and len(cntrs) == 1:
                             x,y,w,h = cv2.boundingRect(cntrs[0])
-                            if w > 20 and h > 20:
-                                text = text.iloc[0]['text']
-                                #print(text)
-                                res[cur_key] = (text, res_mask)
+                            #if w > 20 and h > 20:
+                            text = text.iloc[0]['text']
+                            #print(text)
+                            res[cur_key] = (text, res_mask)
     return res
 
 
-dg = DocGenerator(-1)
+def get_random_color():
+    w = np.random.randint(5)
+    if w == 0:
+        return (
+                np.random.randint(0, 70),
+                np.random.randint(0, 70),
+                np.random.randint(0, 70),
+        ),
+    else:
+        return (
+            0,
+            0,
+            0,
+        )
+
+
+dg = DocGenerator(
+            iou_thresh=-1,
+            color=get_random_color,
+            # padding=lambda: (
+            #         np.random.randint(0, 5),
+            #         np.random.randint(0, 5),
+            #         np.random.randint(0, 5),
+            #         np.random.randint(0, 5),
+            # ),
+            padding=(0, 0, 0, 0),
+)
 
 
 def generate_get_images(mode='train'):
@@ -306,27 +232,23 @@ def generate_get_images(mode='train'):
         ocr_rows = ocr_groups.get_group(row['original_image'])
         map_masks = get_mapping_mask(mask, ocr_rows)
         seg_mask = None
-        try:
-            r = dg.generate(im, map_masks)
-            for key, (text, m) in map_masks.items():
-                #print(m.shape)
-                #print(m.max(), m.min())
-                if seg_mask is None:
-                    seg_mask = m
-                else:
-                    seg_mask = np.logical_or(seg_mask, m)
-        except:
-            #print('error')
-            r = im
+        r = dg.generate(im, map_masks)
+        for key, (text, m) in map_masks.items():
+            if seg_mask is None:
+                seg_mask = m
+            else:
+                seg_mask = np.logical_or(seg_mask, m)
+        #print(np.abs(im - r).max(), map_masks.keys())
         if seg_mask is None:
-            #print('none')
             r = im
         if np.abs(im - r).max() == 0:
             seg_mask = np.zeros(im.shape[:2], dtype='float32')
+        if mode == 'train':
+            aug = train_augs_geometric(image=r.astype('uint8'), mask=seg_mask.astype('uint8'))
+            r, seg_mask = aug['image'], aug['mask']
+            r = train_augs_values(image=r)['image']
         seg_mask = np.expand_dims(seg_mask, axis=-1)
-        #print(seg_mask.max(), seg_mask.min())
         res_dict[IMAGE] = ToTensor()((r / 255).astype('float32'))
-        #print(seg_mask.shape)
         res_dict[MASK] = ToTensor()(seg_mask.astype('float32'))
         return res_dict
     return get_images
@@ -336,7 +258,7 @@ train_dataset = BaseDataset(
     df=train_df,
     callbacks=[
         #generate_imread_callback(image_key=IMAGE, shape=SHAPE),
-        generate_get_images('train'),
+        generate_get_images('train_no_aug'),
     ],
 )
 val_dataset = BaseDataset(
@@ -364,7 +286,14 @@ pipeline = BasePipeline(
     train_loader=train_loader,
     val_loader=val_loader,
     models={SEG_MODEL: ModelWrapper(
-        model=smp.Unet(encoder_name='efficientnet-b0', decoder_attention_type='scse', classes=1, activation='sigmoid'),
+        #model=smp.FPN(encoder_name='efficientnet-b0', classes=1, activation='sigmoid'),
+        model=TimmFPN(
+            'efficientnet_b0',
+            classes=1,
+            activation=torch.nn.Sigmoid(),
+            return_dict=False,
+            features_block='each',
+        ),
         keys=[
             ([IMAGE], ['out']),
         ],

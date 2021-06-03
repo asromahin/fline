@@ -9,6 +9,7 @@ def iou_dots_loss(pr, gt, device, eps=1e-7):
 
 class IouDotsLoss(torch.nn.Module):
     def __init__(self, device):
+        super(IouDotsLoss, self).__init__()
         self.device = device
 
     def forward(self, pr, gt):

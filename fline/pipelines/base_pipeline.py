@@ -4,7 +4,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 import numpy as np
 
-from fline.utils.wrappers import DataWrapper, StrategyWrapper, ModelWrapper
+from fline.utils.wrappers import DataWrapper, ModelWrapper
 from fline.utils.logging.base import BaseLogger
 from fline.utils.saver import Saver, Modes
 from fline.strategies.base import BaseStrategy
@@ -18,7 +18,7 @@ class BasePipeline:
             test_loader: DataLoader = None,
 
             models: tp.Mapping[str, ModelWrapper] = None,
-            strategy: BaseStrategy = BaseStrategy,
+            strategy: BaseStrategy = BaseStrategy(),
             losses: tp.List[DataWrapper] = None,
             metrics: tp.List[DataWrapper] = None,
             loss_reduce: bool = True,
@@ -65,51 +65,39 @@ class BasePipeline:
     def _train_epoch(self, epoch):
         pbar = tqdm(self.train_loader)
         for i, data in enumerate(pbar, 0):
-            for strategy in self.strategies:
-                for data_name, data_val in data.items():
-                    if isinstance(data_val, torch.Tensor):
-                        data[data_name] = data[data_name].to(self.device)
-                data = strategy(
+            for data_name, data_val in data.items():
+                if isinstance(data_val, torch.Tensor):
+                    data[data_name] = data[data_name].to(self.device)
+            data = self.strategy(
+                data=data,
+                is_train=True,
+            )
+            pbar.set_postfix({'loss': data['loss'].item()})
+            if self.logger is not None:
+                self.logger.push(
                     data=data,
-                    models=self.models,
-                    losses=self.losses,
-                    metrics=self.metrics,
-                    device=self.device,
-                    is_train=True,
-                    loss_reduce=self.loss_reduce,
+                    ind=i,
+                    epoch=epoch,
+                    mode=Modes.train,
                 )
-                pbar.set_postfix({'loss': data['loss'].item()})
-                if self.logger is not None:
-                    self.logger.push(
-                        data=data,
-                        ind=i,
-                        epoch=epoch,
-                        mode=Modes.train,
-                    )
-                self.saver.save_best(
-                    models=self.models,
-                    train_data=data,
-                    val_data=None,
-                )
+            self.saver.save_best(
+                models=self.models,
+                train_data=data,
+                val_data=None,
+            )
 
     def _val_epoch(self, epoch):
         if self.val_loader is not None:
             pbar = tqdm(self.val_loader)
             for i, data in enumerate(pbar, 0):
-                for strategy in self.strategies:
-                    for data_name, data_val in data.items():
-                        if isinstance(data_val, torch.Tensor):
-                            data[data_name] = data[data_name].to(self.device)
-                    data = strategy(
-                        data=data,
-                        models=self.models,
-                        losses=self.losses,
-                        metrics=self.metrics,
-                        device=self.device,
-                        is_train=False,
-                        loss_reduce=False,
-                    )
-                    pbar.set_postfix({'loss': data['loss'].item()})
+                for data_name, data_val in data.items():
+                    if isinstance(data_val, torch.Tensor):
+                        data[data_name] = data[data_name].to(self.device)
+                data = self.strategy(
+                    data=data,
+                    is_train=False,
+                )
+                pbar.set_postfix({'loss': data['loss'].item()})
                 if self.logger is not None:
                     self.logger.push(
                         data=data,

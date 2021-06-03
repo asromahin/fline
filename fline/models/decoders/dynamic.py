@@ -23,14 +23,20 @@ class DynamicDecoder(torch.nn.Module):
                 in_features *= 2
             out_features = features[len(features) - 2 - feature_num]
             conv = conv_block(
-                in_features=in_features,
-                out_features=out_features,
+                in_channels=in_features,
+                out_channels=out_features,
                 kernel_size=kernel_size,
                 padding=padding,
             )
             key = 'upconv_' + str(feature_num)
             self.convs.append(key)
             setattr(self, key, conv)
+        self.last_conv = conv_block(
+                in_channels=features[0],
+                out_channels=features[0],
+                kernel_size=kernel_size,
+                padding=padding,
+            )
 
     def forward(self, features):
         if self.return_features:
@@ -46,6 +52,8 @@ class DynamicDecoder(torch.nn.Module):
             x = conv(x)
             if self.return_features:
                 out.append(x)
+        x = self.last_conv(x)
         if self.return_features:
+            out.append(x)
             return out
         return x
