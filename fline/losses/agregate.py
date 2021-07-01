@@ -8,7 +8,7 @@ class BaseLossAgregator(torch.nn.Module):
 
 
 class AddAgregateLosses(BaseLossAgregator):
-    def __init__(self, losses: tp.List[tp.Callable, float]):
+    def __init__(self, losses: tp.List[tp.Tuple[tp.Callable, float]]):
         self.losses = losses
         super(AddAgregateLosses, self).__init__()
         

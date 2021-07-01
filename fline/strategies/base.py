@@ -83,24 +83,35 @@ class BaseStrategy:
 class StageStrategy(BaseStrategy):
     def __init__(
             self,
-            stages: tp.List[tp.List[tp.Mapping[str, tp.Tuple[tp.List, tp.List]]]],
+            exclude_losses: tp.List[tp.List[int]],
+            exclude_models: tp.List[tp.List[str]],
+            exclude_metrics: tp.List[tp.List[int]],
     ):
         super(StageStrategy, self).__init__()
-        self.stages = stages
+        self.exclude_losses = exclude_losses
+        self.exclude_models = exclude_models
+        self.exclude_metrics = exclude_metrics
 
     def forward(self, data, is_train=True):
-        data = None
-        for stage in self.stages:
-            cdata = base_strategy(
+        for stage in range(len(self.exclude_losses)):
+            data = base_strategy(
                 data,
                 is_train=is_train,
-                models=self.models,
-                losses=self.losses,
-                metrics=self.metrics,
+                models={
+                    model_name: model
+                    for model_name, model in self.models.items()
+                    if model_name not in self.exclude_models[stage]
+                },
+                losses=[
+                    loss
+                    for i, loss in enumerate(self.losses)
+                    if i not in self.exclude_losses[stage]
+                ],
+                metrics=[
+                    metric
+                    for i, metric in enumerate(self.metrics)
+                    if i not in self.exclude_metrics[stage]
+                ],
                 loss_reduce=self.loss_reduce,
             )
-            if data is None:
-                data = cdata
-            else:
-                data.update(cdata)
         return data

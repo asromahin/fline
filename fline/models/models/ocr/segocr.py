@@ -16,7 +16,7 @@ class SegOcrModel(torch.nn.Module):
             backbone,
             in_channels=3,
             classes=letters_count,
-            encoder_weights=None,
+            #encoder_weights=None,
             decoder_attention_type='scse',
         )
         self.conv = torch.nn.Conv2d(

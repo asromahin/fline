@@ -34,15 +34,23 @@ def padding(im, shape, fill_value):
 
 
 def padding_q(im, q, fill_value):
-    q_x = im.shape[0] % q
-    q_y = im.shape[1] % q
+    res = padding_qxy(im, q, q, fill_value)
+    return res
+
+
+def padding_qxy(im, qy, qx, fill_value):
+    q_x = im.shape[0] % qx
+    q_y = im.shape[1] % qy
     shape_y = im.shape[0]
     shape_x = im.shape[1]
     if q_x != 0:
-        shape_y = im.shape[0] - q_x + q
+        shape_y = im.shape[0] - q_x + qx
     if q_y != 0:
-        shape_x = im.shape[1] - q_y + q
-    res = np.full(shape=(shape_y, shape_x, 3), fill_value=fill_value, dtype='float32')
+        shape_x = im.shape[1] - q_y + qy
+    if len(im.shape) == 2:
+        res = np.full(shape=(shape_y, shape_x), fill_value=fill_value, dtype='float32')
+    else:
+        res = np.full(shape=(shape_y, shape_x, im.shape[2]), fill_value=fill_value, dtype='float32')
     y_shift = (shape_y - im.shape[0])//2
     x_shift = (shape_x - im.shape[1])//2
     res[y_shift:y_shift+im.shape[0], x_shift:x_shift+im.shape[1]] = im

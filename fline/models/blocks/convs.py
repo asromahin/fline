@@ -65,13 +65,17 @@ class SimpleUpConvBlock(torch.nn.Module):
     ):
         super(SimpleUpConvBlock, self).__init__()
 
-        self.conv = torch.nn.ConvTranspose2d(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            padding=padding,
-            stride=2,
-            output_padding=1,
+        # self.conv = torch.nn.ConvTranspose2d(
+        #     in_channels,
+        #     out_channels,
+        #     kernel_size=kernel_size,
+        #     padding=padding,
+        #     stride=2,
+        #     output_padding=1,
+        # )
+        self.conv = torch.nn.Sequential(
+            UpSampleConv(in_channels, scale=2),
+            torch.nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, padding=1, stride=1),
         )
         self.conv2 = ResidualBlock(out_channels, out_channels)
         # self.uppool = torch.nn.Upsample(scale_factor=2)
@@ -81,3 +85,25 @@ class SimpleUpConvBlock(torch.nn.Module):
         x = self.conv2(x)
         # x = self.uppool(x)
         return x
+
+
+class UpSampleConv(torch.nn.Module):
+    def __init__(self, in_channels, scale=2):
+        super(UpSampleConv, self).__init__()
+        self.conv = torch.nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=in_channels*(scale**2),
+            kernel_size=3,
+            padding=1,
+            stride=1,
+        )
+        self.scale = scale
+        self.in_channels = in_channels
+
+    def forward(self, x):
+        out = self.conv(x)
+        res = torch.rand((x.shape[0], x.shape[1], x.shape[2]*self.scale, x.shape[3]*self.scale), device=x.device)
+        for i in range(self.scale):
+            for j in range(self.scale):
+                res[:, :, i::self.scale, j::self.scale] = out[:, self.in_channels*(i*self.scale+j):self.in_channels*(i*self.scale+j+1)]
+        return res

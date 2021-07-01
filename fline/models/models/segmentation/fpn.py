@@ -23,17 +23,23 @@ class FPN(torch.nn.Module):
         self.features_block = features_block
         self.classes = classes
         self.out_feature_channels = sum([*feature_channels[:-1], feature_channels[0]])
-        self.classify = torch.nn.Conv2d(
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            in_channels=self.out_feature_channels,
-            out_channels=self.classes,
-        )
-        #print(feature_channels)
-        self.activation = activation
+        if self.classes is not None:
+            self.classify = torch.nn.Conv2d(
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                in_channels=self.out_feature_channels,
+                out_channels=self.classes,
+            )
+            self.activation = activation
         self.return_dict = return_dict
         self.upsample_feature = torch.nn.UpsamplingNearest2d(scale_factor=2)
+        # feature_channels = feature_channels[:-1]
+        # feature_channels = feature_channels[::-1]
+        # self.upsample_features = [
+        #     SimpleUpConvBlock(in_channels=sum(feature_channels[:i+1]), out_channels=sum(feature_channels[:i+1]), kernel_size=3, padding=1)
+        #     for i, f_ch in enumerate(feature_channels)
+        # ]
 
     def forward(self, x):
         #print(x.shape)
@@ -42,7 +48,8 @@ class FPN(torch.nn.Module):
             features = self.features_block(features)
         decoder_features = self.decoder(features)
         x = None
-        for decoder_feature in decoder_features:
+        for i, decoder_feature in enumerate(decoder_features):
+            #print(decoder_feature.shape, self.upsample_features[i])
             if x is None:
                 x = decoder_feature
             else:
@@ -133,6 +140,9 @@ class EachForEachFeaturesBlock(torch.nn.Module):
                     out_channels=self.features_channels[i],
                 )
                 setattr(self, key2, cur_conv2)
+            norm_key = 'norm_' + str(i)
+            norm = torch.nn.BatchNorm2d(self.features_channels[i])
+            setattr(self, norm_key, norm)
 
     def forward(self, features):
         #print('-'*60)
@@ -142,16 +152,22 @@ class EachForEachFeaturesBlock(torch.nn.Module):
                 cur_conv1 = getattr(self, key1)
                 key2 = 'conv_' + str(j) + '_' + str(i)
                 cur_conv2 = getattr(self, key2)
+                norm_key1 = 'norm_' + str(j)
+                norm1 = getattr(self, norm_key1)
+                norm_key2 = 'norm_' + str(i)
+                norm2 = getattr(self, norm_key2)
                 #print(i, j)
                 cur_feature = cur_conv2(features[j])
                 for t in range(j - i):
                     cur_feature = self.upsample(cur_feature)
                 features[i] = features[i] + cur_feature
+                features[i] = norm2(features[i])
 
                 cur_feature = cur_conv1(features[i])
                 for t in range(j - i):
                     cur_feature = self.pool(cur_feature)
                 features[j] = features[j] + cur_feature
+                features[j] = norm1(features[j])
 
         return features
 

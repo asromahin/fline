@@ -23,13 +23,11 @@ from fline.utils.data.dataset import BaseDataset
 
 from fline.utils.wrappers import ModelWrapper, DataWrapper
 from fline.utils.logging.base import EnumLogDataTypes
-
 from fline.utils.logging.groups import ProcessImage
 
 from fline.utils.data.image.io import imread_padding
 
-from fline.models.models.research.object_detection_model import ObjectDetectionModel
-from fline.losses.research.bbox import BboxLoss
+from fline.models.models.object_detection.map_net import MapNetTimm, MapLoss, MapNetSMP
 
 from sklearn.model_selection import train_test_split
 from torch.utils.data._utils.collate import default_collate
@@ -41,13 +39,13 @@ os.environ['NO_PROXY'] = 'koala03.ftc.ru'
 os.environ['no_proxy'] = 'koala03.ftc.ru'
 
 
-SHAPE = (256, 256)
+SHAPE = (512, 512)
 PROECT_NAME = '[RESEARCH]ObjectDetection'
-TASK_NAME = 'test_deep_vector_new_loss'
+TASK_NAME = 'map_net_test'
 SEG_MODEL = 'seg_model'
 MASK = 'mask'
 BBOX = 'bbox'
-DEVICE = 'cuda:2'
+DEVICE = 'cuda:1'
 IMAGE = 'IMAGE'
 
 
@@ -102,70 +100,43 @@ train_augs_values = alb.Compose([
 ])
 
 
-def generate_get_mask(mode='train'):
-    def get_mask(row, res_dict):
-        im = imread_padding(row[IMAGE], 64, 0).astype('uint8')
-        mask = imread_padding(row[MASK], 64, 0).astype('uint8')
-        mask = mask[:, :, 2:3]
-        r_mask = np.zeros(mask.shape, dtype='int')
-        last_i = 1
-        for i, m in enumerate(np.unique(mask)):
-            if m != 0:
-                c_mask = (mask == m).astype('uint8')[:, :, 0]
-                conn_max, conn = cv2.connectedComponents(c_mask)
-                #print(conn_max, np.unique(conn), m)
-                c_mask = c_mask * last_i
-                conn = conn + c_mask
-                r_mask[:, :, 0] += conn
-                last_i += conn_max
-        mask = r_mask
-        #print(mask.max())
-        if mode == 'train':
-            aug = train_augs_geometric(image=im, mask=mask)
-            im, mask = aug['image'], aug['mask']
-        if mode == 'train':
-            im = train_augs_values(image=im.astype('uint8'))['image']
-        im = im.astype('float32')
-        res_dict[IMAGE] = ToTensor()((im / 255).astype('float32'))
-        res_dict[MASK] = ToTensor()(mask.astype('float32'))
-        res_dict[MASK+'bin'] = ToTensor()((mask > 0).astype('float32'))
-        return res_dict
-    return get_mask
-
-
 def generate_get_bboxes(mode='train'):
     def get_bboxes(row, res_dict):
-        im = imread_padding(row[IMAGE], 64, 0).astype('uint8')
-        mask = imread_padding(row[MASK], 64, 0).astype('uint8')
-        im = cv2.resize(im, SHAPE)
-        mask = cv2.resize(mask, SHAPE)
+        #im = imread_padding(row[IMAGE], 64, 0).astype('uint8')
+        #mask = imread_padding(row[MASK], 64, 0).astype('uint8')
+        im = cv2.imread(row[IMAGE]).astype('uint8')
+        im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+        mask = cv2.imread(row[MASK]).astype('uint8')
+        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2RGB)
         mask = mask[:, :, 2:3]
-        r_mask = np.zeros(mask.shape, dtype='int')
-        last_i = 1
         bboxes = []
+        #print('-'*60)
         for i, m in enumerate(np.unique(mask)):
             if m != 0:
                 c_mask = (mask == m).astype('uint8')[:, :, 0]
+                c_mask = cv2.resize(
+                    c_mask.astype('uint8'),
+                    SHAPE,
+                    interpolation=cv2.INTER_NEAREST,
+                ).astype('uint8')
                 cntrs, _ = cv2.findContours(c_mask, 0, 1)
                 for cnt in cntrs:
                     x,y,w,h = cv2.boundingRect(cnt)
-                    x = (x + w/2) / im.shape[1]
-                    y = (y + h/2) / im.shape[0]
-                    w = w / im.shape[1]
-                    h = h / im.shape[0]
-                    bboxes.append((x,y,w,h))
-                conn_max, conn = cv2.connectedComponents(c_mask)
-                c_mask = c_mask * last_i
-                conn = conn + c_mask
-                r_mask[:, :, 0] += conn
-                last_i += conn_max
-        mask = r_mask
+                    #print(x,y,w,h)
+                    if w > 1 and h > 1:
+                        x = (x + w/2) / c_mask.shape[1]
+                        y = (y + h/2) / c_mask.shape[0]
+                        w = w / c_mask.shape[1]
+                        h = h / c_mask.shape[0]
+                        bboxes.append((x, y, w, h))
+        #a = len(np.unique(mask))
+        im = cv2.resize(im.astype('uint8'), SHAPE).astype('uint8')
+        #mask = cv2.resize(mask.astype('uint8'), SHAPE, interpolation=cv2.INTER_NEAREST).astype('uint8')
+        #print(a, len(np.unique(mask)))
         bboxes = torch.tensor(bboxes, dtype=torch.float32)
         im = im.astype('float32')
-        #mask = cv2.resize(mask, SHAPE)
         res_dict[IMAGE] = ToTensor()((im / 255).astype('float32'))
         res_dict[BBOX] = bboxes
-        res_dict[MASK] = ToTensor()(mask.astype('float32'))
         return res_dict
     return get_bboxes
 
@@ -201,17 +172,17 @@ val_dataset = BaseDataset(
 )
 train_loader = DataLoader(
     dataset=train_dataset,
-    batch_size=8,
+    batch_size=1,
     num_workers=4,
     shuffle=True,
-    collate_fn=collate_fn,
+    #collate_fn=collate_fn,
 )
 val_loader = DataLoader(
     dataset=val_dataset,
-    batch_size=8,
+    batch_size=1,
     num_workers=4,
     shuffle=False,
-    collate_fn=collate_fn,
+    #collate_fn=collate_fn,
 )
 
 
@@ -230,12 +201,13 @@ pipeline = BasePipeline(
     train_loader=train_loader,
     val_loader=val_loader,
     models={SEG_MODEL: ModelWrapper(
-        model=ObjectDetectionModel(
-            'efficientnet_b0',
-            features_block=None,
+        model=MapNetSMP(
+            'efficientnet-b0',
+            #features_block=None,
+            device=DEVICE,
         ),
         keys=[
-            ([IMAGE], ['bboxes', 'conn']),
+            ([IMAGE], ['points', 'bboxes']),
         ],
         optimizer=torch.optim.Adam,
         optimizer_kwargs={
@@ -244,9 +216,9 @@ pipeline = BasePipeline(
     )},
     losses=[
         DataWrapper(
-            BboxLoss(DEVICE),
+            MapLoss(DEVICE),
             keys=[
-                (['bboxes', BBOX], ['loss'])
+                (['points', 'bboxes', BBOX], ['loss'])
             ],
         ),
     ],
@@ -257,13 +229,16 @@ pipeline = BasePipeline(
         log_each_ind=0,
         log_each_epoch=True,
         log_keys={
-            'conn': ProcessImage(
-                log_type=EnumLogDataTypes.image,
-                process_func=log_connected,
-            ),
+            # 'conn': ProcessImage(
+            #     log_type=EnumLogDataTypes.image,
+            #     process_func=log_connected,
+            # ),
             'loss': EnumLogDataTypes.loss,
             IMAGE: EnumLogDataTypes.image,
-            'iou': EnumLogDataTypes.metric,
+            'points': ProcessImage(
+                 log_type=EnumLogDataTypes.image,
+                 process_func=lambda x: x['points'].argmax(dim=1).to(dtype=torch.uint8)*255,
+            ),
         },
         project_name=PROECT_NAME,
         task_name=TASK_NAME,

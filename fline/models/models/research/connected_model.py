@@ -1,218 +1,338 @@
 import torch
-import timm
 import segmentation_models_pytorch as smp
 
+from fline.models.models.research.connected_components import ConnectedComponents
+from fline.losses.segmentation.dice import BCEDiceLoss
+from fline.models.blocks.attention import ConnCompAttention
+from fline.models.models.segmentation.fpn import TimmFPN
 
-class ConnectLoss(torch.nn.Module):
 
+class ConnectedModelSMP(torch.nn.Module):
+    def __init__(
+            self,
+            backbone_name='resnet18',
+            classes=2,
+            activation='softmax',
+            device='cpu',
+    ):
+        super(ConnectedModelSMP, self).__init__()
+        # self.model = TimmFPN(
+        #     backbone_name=backbone_name,
+        #     #features_block='each',
+        #     classes=classes,
+        #     activation=None,
+        # )
+        self.model = smp.FPN(encoder_name=backbone_name, classes=classes, activation=None)
+        self.activation = torch.nn.Softmax2d()
+
+    def forward(self, x):
+        out = self.model(x)
+        out = self.activation(out)
+        return out
+
+
+class ConnectedLoss(torch.nn.Module):
     def __init__(self, device):
-        super(ConnectLoss, self).__init__()
+        super(ConnectedLoss, self).__init__()
+        self.conn_comp = ConnectedComponents()
         self.loss = BCEDiceLoss()
-        self.mse = torch.nn.MSELoss()
         self.device = device
 
-    def forward(
-            self,
-            pred_instance_mask: torch.Tensor,
-            pred_score: torch.Tensor,
-            cls_out: torch.Tensor,
-            target_mask: torch.Tensor,
-    ):
-        res_loss = self.mse(pred_score, torch.zeros(pred_score.size(), device=self.device))
-        res_loss += self.loss(cls_out, (target_mask > 0).to(dtype=torch.float32))
-        k_keys = torch.unique(pred_instance_mask)
-        n_keys = torch.unique(target_mask)
-        for n in n_keys:
-            target_cur_mask = (target_mask == n)
-            cur_loss = None
-            for k in k_keys:
-                pred_cur_mask = (pred_instance_mask == k)
-                tloss = self.loss(pred_cur_mask.to(torch.float32), target_cur_mask.to(torch.float32))
-                if cur_loss is None:
-                    cur_loss = tloss
-                else:
-                    if tloss < cur_loss:
-                        cur_loss = tloss
-            if cur_loss is not None:
-                res_loss += cur_loss
-        return res_loss/len(n_keys)
+    def forward(self, pred_out, target_mask):
+
+        pred_masks = pred_out.argmax(dim=1)
+        res_loss = self.loss((pred_out[:,1:2,:,:]*(pred_masks.unsqueeze(dim=1) > 0)).to(dtype=torch.float32), (target_mask > 0).to(dtype=torch.float32))
+        pred_uniq = list(torch.unique(pred_masks))
+        target_uniq = list(torch.unique(target_mask))
+        #print(pred_uniq, len(pred_uniq))
+        for v in pred_uniq:
+            if v != 0:
+                cur_mask = (pred_masks == v)
+                #print(v, cur_mask.sum()/cur_mask.shape[1]/cur_mask.shape[2])
+                cur_mask = self.conn_comp(cur_mask)
+                cur_uniq = list(torch.unique(cur_mask))
+                for t in target_uniq:
+                    min_loss = None
+                    min_ind = None
+                    target_m = (target_mask == t).to(dtype=torch.float32)
+                    for f in cur_uniq:
+                        c_mask = pred_out[:, v:v+1, :, :] * (cur_mask == f)
+                        #print(c_mask.dtype, target_m.dtype)
+                        cur_loss = self.loss(c_mask, target_m)
+                        if min_loss is None:
+                            min_loss = cur_loss
+                            min_ind = f
+                        else:
+                            if cur_loss < min_loss:
+                                min_loss = cur_loss
+                                min_ind = f
+                    if min_loss is not None:
+                        if res_loss is None:
+                            res_loss = min_loss
+                        else:
+                            res_loss += min_loss
+                        cur_uniq.remove(min_ind)
+                        target_uniq.remove(t)
+                res_loss += len(cur_uniq)
+        res_loss += len(target_uniq)
+        return res_loss
 
 
-class ConnectLossV2(torch.nn.Module):
-
+class ConnectedLossV2(torch.nn.Module):
     def __init__(self, device):
-        super(ConnectLossV2, self).__init__()
-        self.loss = BCEDiceLoss(activation=None)
+        super(ConnectedLossV2, self).__init__()
+        self.conn_comp = ConnectedComponents()
+        self.loss = BCEDiceLoss()
         self.device = device
 
-    def forward(
-            self,
-            pred_instance_mask: torch.Tensor,
-            cls_out: torch.Tensor,
-            target_mask: torch.Tensor,
-    ):
-        res_loss = self.loss(cls_out, (target_mask > 0).to(dtype=torch.float32))
-        res_loss += self.loss(
-            pred_instance_mask[:, 0:1, :, :].to(torch.float32),
-            (target_mask == 0).to(torch.float32),
-        )
-        all_k_keys = list(range(pred_instance_mask.shape[1]))
-        all_k_keys.remove(0)
-        n_keys = list(torch.unique(target_mask))
-        n_keys.remove(0)
-        for n in n_keys:
-            target_cur_mask = (target_mask == n)
-            cur_loss = None
-            select_k = None
-            k_keys = all_k_keys
-            for k in k_keys:
-                pred_cur_mask = pred_instance_mask[:, k:k+1, :, :]
-                tloss = self.loss(pred_cur_mask.to(torch.float32), target_cur_mask.to(torch.float32))
-                if cur_loss is None:
-                    cur_loss = tloss
-                    select_k = k
+    def forward(self, pred_out, target_mask):
+
+        pred_masks = pred_out.argmax(dim=1)
+        res_loss = self.loss((pred_out[:,1:2,:,:]*(pred_masks.unsqueeze(dim=1) > 0)).to(dtype=torch.float32), (target_mask > 0).to(dtype=torch.float32))
+        pred_masks = pred_out.argmax(dim=1)
+        pred_uniq = list(torch.unique(pred_masks))
+        pred_placeholder = torch.zeros_like(pred_masks, dtype=torch.float32)
+        target_uniq = list(torch.unique(target_mask))
+        if 0 in target_uniq:
+            target_uniq.remove(0)
+        last_i = 1
+        for v in pred_uniq:
+            if v != 0:
+                cur_mask = (pred_masks == v)
+                cur_mask = self.conn_comp(cur_mask)
+                cur_uniq = list(torch.unique(cur_mask))
+                for c in cur_uniq:
+                    if c != 0:
+                        c_mask = (cur_mask == c)
+                        pred_placeholder += (c_mask*c + last_i)
+                last_i += len(cur_uniq)
+        cur_uniq = list(torch.unique(pred_placeholder))
+        if 0 in cur_uniq:
+            cur_uniq.remove(0)
+        #print(len(cur_uniq))
+        #print(len(cur_uniq))
+        for t in target_uniq:
+            min_loss = None
+            min_ind = None
+            target_m = (target_mask == t).to(dtype=torch.float32)
+            for f in cur_uniq:
+                c_mask = (pred_placeholder == f).to(dtype=torch.float32).unsqueeze(dim=1)
+                # print(c_mask.dtype, target_m.dtype)
+                cur_loss = self.loss(c_mask, target_m)
+                if min_loss is None:
+                    min_loss = cur_loss
+                    min_ind = f
                 else:
-                    if tloss < cur_loss:
-                        cur_loss = tloss
-                        select_k = k
-            if cur_loss is not None:
-                all_k_keys.remove(select_k)
-                res_loss += cur_loss
-        return res_loss/len(n_keys)
+                    if cur_loss < min_loss:
+                        min_loss = cur_loss
+                        min_ind = f
+            if min_loss is not None:
+                if res_loss is None:
+                    res_loss = min_loss
+                else:
+                    res_loss += min_loss
+                cur_uniq.remove(min_ind)
+                target_uniq.remove(t)
+        res_loss += len(cur_uniq)
+        res_loss += len(target_uniq)
+        return res_loss
 
 
-class ConnectLossV3(torch.nn.Module):
-
+class ConnectedLossV3(torch.nn.Module):
     def __init__(self, device):
-        super(ConnectLossV3, self).__init__()
-        self.loss = BCEDiceLoss(activation=None)
+        super(ConnectedLossV3, self).__init__()
+        self.conn_comp = ConnectedComponents()
+        self.loss = BCEDiceLoss()
         self.device = device
 
-    def forward(
-            self,
-            pred_instance_mask: torch.Tensor,
-            target_mask: torch.Tensor,
-    ):
+    def forward(self, pred_out, target_mask):
+
+        pred_masks = pred_out.argmax(dim=1)
+        res_loss = self.loss((pred_out[:,1:2,:,:]*(pred_masks.unsqueeze(dim=1) > 0)).to(dtype=torch.float32), (target_mask > 0).to(dtype=torch.float32))
+        pred_masks = pred_out.argmax(dim=1)
+        pred_uniq = list(torch.unique(pred_masks))
+        pred_placeholder = torch.zeros_like(pred_masks, dtype=torch.float32)
+        target_uniq = list(torch.unique(target_mask))
+        if 0 in target_uniq:
+            target_uniq.remove(0)
+        last_i = 1
+        for v in pred_uniq:
+            if v != 0:
+                cur_mask = (pred_masks == v)
+                cur_mask = self.conn_comp(cur_mask)
+                cur_uniq = list(torch.unique(cur_mask))
+                for c in cur_uniq:
+                    if c != 0:
+                        c_mask = (cur_mask == c)
+                        pred_placeholder += (c_mask*c + last_i)
+                last_i += len(cur_uniq)
+
+        #print(len(cur_uniq))
+        #print(len(cur_uniq))
+        multiply_mask = pred_placeholder*target_mask
+        for t in target_uniq:
+            min_loss = None
+            min_ind = None
+            target_m = (target_mask == t).to(dtype=torch.float32)
+            cur_mult_mask = multiply_mask * target_mask
+            cur_uniq = list(torch.unique(cur_mult_mask))
+            if 0 in cur_uniq:
+                cur_uniq.remove(0)
+            for f in cur_uniq:
+                c_mask = (cur_mult_mask == f).to(dtype=torch.float32)#.unsqueeze(dim=1)
+                # print(c_mask.dtype, target_m.dtype)
+                cur_loss = self.loss(c_mask, target_m)
+                if min_loss is None:
+                    min_loss = cur_loss
+                    min_ind = f
+                else:
+                    if cur_loss < min_loss:
+                        min_loss = cur_loss
+                        min_ind = f
+            if min_loss is not None:
+                if res_loss is None:
+                    res_loss = min_loss
+                else:
+                    res_loss += min_loss
+                cur_uniq.remove(min_ind)
+                target_uniq.remove(t)
+            res_loss += len(cur_uniq)
+        res_loss += len(target_uniq)
+        return res_loss/len(torch.unique(target_mask))
+
+
+class ConnectedLossV4(torch.nn.Module):
+    def __init__(self, device):
+        super(ConnectedLossV4, self).__init__()
+        self.conn_comp = ConnectedComponents()
+        self.loss = BCEDiceLoss()
+        self.device = device
+
+    def forward(self, pred_out, target_mask):
+
+        pred_masks = pred_out.argmax(dim=1)
+        res_loss = self.loss((pred_out[:,0:1,:,:]*(pred_masks.unsqueeze(dim=1) == 0)).to(dtype=torch.float32), (target_mask == 0).to(dtype=torch.float32))
+        pred_masks = pred_out.argmax(dim=1)
+        pred_uniq = list(torch.unique(pred_masks))
+        pred_placeholder = torch.zeros_like(pred_masks, dtype=torch.float32)
+        target_uniq = list(torch.unique(target_mask))
+        if 0 in target_uniq:
+            target_uniq.remove(0)
+        last_i = 1
+        for v in pred_uniq:
+            if v != 0:
+                cur_mask = (pred_masks == v)
+                cur_mask = self.conn_comp(cur_mask)
+                cur_uniq = list(torch.unique(cur_mask))
+                for c in cur_uniq:
+                    if c != 0:
+                        c_mask = (cur_mask == c)
+                        pred_placeholder += (c_mask*c + last_i)
+                last_i += len(cur_uniq)
+
+
+        #multiply_mask = pred_placeholder*target_mask
+        for t in target_uniq:
+            target_m = (target_mask == t)[:, 0]
+            #print(pred_placeholder.shape, target_m.shape)
+            med = torch.median(pred_placeholder[target_m])
+            full_med_mask = (pred_placeholder == med).to(dtype=torch.float32)
+            res_loss += self.loss(full_med_mask, target_m.to(dtype=torch.float32))
+        return res_loss/(len(torch.unique(target_mask))+1)
+
+
+class ConnectedLossV5(torch.nn.Module):
+    def __init__(self, device):
+        super(ConnectedLossV5, self).__init__()
+        self.conn_comp = ConnectedComponents()
+        self.loss = torch.nn.BCELoss()
+        self.device = device
+
+    def forward(self, pred_out, target_mask):
+
+        pred_masks = pred_out.argmax(dim=1)
         res_loss = self.loss(
-            pred_instance_mask[:, 0:1, :, :].to(torch.float32),
-            (target_mask == 0).to(torch.float32),
+            (pred_out[:, 0:1, :, :]*(pred_masks.unsqueeze(dim=1) == 0)).to(dtype=torch.float32),
+            (target_mask == 0).to(dtype=torch.float32),
         )
-        k_keys = list(range(pred_instance_mask.shape[1]))
-        k_keys.remove(0)
-        n_keys = list(torch.unique(target_mask))
-        n_keys.remove(0)
-        for n in n_keys:
-            target_cur_mask = (target_mask == n)
-            cur_loss = None
-            select_k = None
-            for k in k_keys:
-                pred_cur_mask = pred_instance_mask[:, k:k+1, :, :]
-                tloss = self.loss(pred_cur_mask.to(torch.float32), target_cur_mask.to(torch.float32))
-                if cur_loss is None:
-                    cur_loss = tloss
-                    select_k = k
-                else:
-                    if tloss < cur_loss:
-                        cur_loss = tloss
-                        select_k = k
-            if cur_loss is not None:
-                k_keys.remove(select_k)
-                res_loss += cur_loss
-        return res_loss/len(n_keys)
+        pred_uniq = list(torch.unique(pred_masks))
+        pred_placeholder = torch.zeros_like(pred_masks, dtype=torch.float32, device=self.device)
+        pred_placeholder_out = torch.zeros_like(pred_masks, dtype=torch.float32, device=self.device)
+        target_uniq = list(torch.unique(target_mask))
+        if 0 in target_uniq:
+            target_uniq.remove(0)
+        last_i = 1
+        for v in pred_uniq:
+            if v != 0:
+                cur_mask = (pred_masks == v)
+                cur_mask = self.conn_comp(cur_mask)
+                cur_uniq = list(torch.unique(cur_mask))
+                for c in cur_uniq:
+                    if c != 0:
+                        c_mask = (cur_mask == c)
+                        pred_placeholder = (c_mask + last_i)
+                        #print(c_mask.shape, pred_out.shape, pred_placeholder_out.shape)
+                        pred_placeholder_out[c_mask] = pred_out[:, v][c_mask]
+                last_i += len(cur_uniq)
 
 
-class SuperModel(torch.nn.Module):
-  def __init__(self, backbone_name, last_features=32, connected_channels=1, classes=1):
-    super(SuperModel, self).__init__()
-    self.backbone_name = backbone_name
-    self.encoder = timm.create_model(backbone_name, features_only=True)
-    self.features_channels = [last_features, *self.get_features()]
-    self.decoder = Decoder(features=self.features_channels)
-    #self.out_conv = conv3x3(last_features, last_features)
-    self.classify = conv3x3(last_features, classes)
-    self.connected = conv3x3(last_features, connected_channels)
+        #multiply_mask = pred_placeholder*target_mask
+        for t in target_uniq:
+            target_m = (target_mask == t)[:, 0]
+            #print(pred_placeholder.shape, target_m.shape)
+            values = pred_placeholder[target_m]
+            med = torch.median(values)
 
-  def get_features(self):
-    with torch.no_grad():
-      features = self.encoder(torch.zeros((1, 3, 64, 64)))
-    return [f.shape[1] for f in features]
-
-  def forward(self, x):
-    features = self.encoder(x)
-    encoded = self.decoder(features)
-    #output = self.out_conv(encoded)
-    cls_out = self.classify(encoded)
-    connected_out = self.connected(encoded)
-    x_long = connected_out.to(dtype=torch.long)
-    x_score = (connected_out - x_long)**2
-    return x_long, x_score, cls_out
+            full_med_mask = (pred_placeholder == med)#.to(dtype=torch.float32)
+            #print(pred_placeholder_out.mean().item(), (pred_placeholder_out * full_med_mask).mean().item())
+            res_loss += self.loss(pred_placeholder_out * full_med_mask, target_m.to(dtype=torch.float32))
+            extra_mask = ((pred_placeholder != med) * target_m)#.to(dtype=torch.float32)
+            res_loss += (pred_placeholder_out*extra_mask).sum()/target_m.sum()
+        return res_loss/(len(torch.unique(target_mask))*2+1)
 
 
-class SuperModelV2(torch.nn.Module):
-  def __init__(self, backbone_name, last_features=32, connected_channels=1, classes=1):
-    super(SuperModelV2, self).__init__()
-    self.backbone_name = backbone_name
-    self.encoder = timm.create_model(backbone_name, features_only=True)
-    self.features_channels = [last_features, *self.get_features()]
-    self.decoder = Decoder(features=self.features_channels)
-    #self.out_conv = conv3x3(last_features, last_features)
-    self.classify = conv3x3(last_features, classes)
-    self.connected = conv3x3(last_features, connected_channels)
+class ConnectedLossV6(torch.nn.Module):
+    def __init__(self, device):
+        super(ConnectedLossV6, self).__init__()
+        self.conn_comp = ConnectedComponents()
+        self.loss = BCEDiceLoss()
+        self.device = device
 
-  def get_features(self):
-    with torch.no_grad():
-      features = self.encoder(torch.zeros((1, 3, 64, 64)))
-    return [f.shape[1] for f in features]
+    def forward(self, pred_out, target_mask):
 
-  def forward(self, x):
-    features = self.encoder(x)
-    encoded = self.decoder(features)
-    #output = self.out_conv(encoded)
-    cls_out = self.classify(encoded)
-    connected_out = self.connected(encoded)
-    connected_out = torch.softmax(connected_out, dim=1)
-    return connected_out, cls_out
-
-
-class SuperModelV3(torch.nn.Module):
-  def __init__(self, backbone_name, last_features=32, connected_channels=1, classes=1):
-    super(SuperModelV3, self).__init__()
-    self.backbone_name = backbone_name
-    self.model = smp.FPN(self.backbone_name, classes=last_features)
-    self.classify = conv3x3(last_features, classes)
-    self.connected = conv3x3(last_features, connected_channels)
-
-  def get_features(self):
-    with torch.no_grad():
-      features = self.encoder(torch.zeros((1, 3, 64, 64)))
-    return [f.shape[1] for f in features]
-
-  def forward(self, x):
-    encoded = self.model(x)
-    cls_out = self.classify(encoded)
-    connected_out = self.connected(encoded)
-    connected_out = torch.softmax(connected_out, dim=1)
-    return connected_out, cls_out
+        pred_masks = pred_out.argmax(dim=1)
+        zero_mask = pred_masks.max(dim=1)[0]
+        res_loss = self.loss(((zero_mask == 0)).to(dtype=torch.float32), (target_mask == 0).to(dtype=torch.float32))
+        #pred_masks = pred_out.argmax(dim=1)
+        pred_uniq = list(torch.unique(pred_masks))
+        pred_placeholder = torch.zeros_like(pred_masks, dtype=torch.float32, device=self.device)
+        pred_placeholder_out = torch.zeros_like(pred_masks, dtype=torch.float32, device=self.device)
+        target_uniq = list(torch.unique(target_mask))
+        if 0 in target_uniq:
+            target_uniq.remove(0)
+        last_i = 1
+        for v in pred_uniq:
+            if v != 0:
+                cur_mask = (pred_masks == v)
+                cur_mask = self.conn_comp(cur_mask)
+                cur_uniq = list(torch.unique(cur_mask))
+                for c in cur_uniq:
+                    if c != 0:
+                        c_mask = (cur_mask == c)
+                        pred_placeholder += (c_mask + last_i)
+                        #print(c_mask.shape, pred_out.shape, pred_placeholder_out.shape)
+                        pred_placeholder_out[c_mask] = pred_out[:, v][c_mask]
+                last_i += len(cur_uniq)
 
 
-class SuperModelV4(torch.nn.Module):
-  def __init__(self, backbone_name, last_features=32, connected_channels=1):
-    super(SuperModelV4, self).__init__()
-    self.backbone_name = backbone_name
-    self.encoder = timm.create_model(backbone_name, features_only=True)
-    self.features_channels = [last_features, *self.get_features()]
-    self.decoder = Decoder(features=self.features_channels, return_features=True)
-    self.connected = conv3x3(last_features, connected_channels)
-
-  def get_features(self):
-    with torch.no_grad():
-      features = self.encoder(torch.zeros((1, 3, 64, 64)))
-    #[print(f.shape[1]) for f in features]
-    return [f.shape[1] for f in features]
-
-  def forward(self, x):
-    features = self.encoder(x)
-    encoded = self.decoder(features)
-    connected_out = self.connected(encoded[-1])
-    connected_out = torch.softmax(connected_out, dim=1)
-    return connected_out, encoded
+        #multiply_mask = pred_placeholder*target_mask
+        for t in target_uniq:
+            target_m = (target_mask == t)[:, 0]
+            #print(pred_placeholder.shape, target_m.shape)
+            values = pred_placeholder[target_m]
+            med = torch.median(values)
+            full_med_mask = (pred_placeholder == med)#.to(dtype=torch.float32)
+            res_loss += self.loss(pred_placeholder_out * full_med_mask, target_m.to(dtype=torch.float32))
+            extra_mask = ((pred_placeholder != med) * target_m)#.to(dtype=torch.float32)
+            res_loss += (pred_placeholder_out*extra_mask).sum()/target_m.sum()
+        return res_loss/(len(torch.unique(target_mask))*2+1)
