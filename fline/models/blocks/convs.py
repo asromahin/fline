@@ -65,18 +65,18 @@ class SimpleUpConvBlock(torch.nn.Module):
     ):
         super(SimpleUpConvBlock, self).__init__()
 
-        # self.conv = torch.nn.ConvTranspose2d(
-        #     in_channels,
-        #     out_channels,
-        #     kernel_size=kernel_size,
-        #     padding=padding,
-        #     stride=2,
-        #     output_padding=1,
-        # )
-        self.conv = torch.nn.Sequential(
-            UpSampleConv(in_channels, scale=2),
-            torch.nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, padding=1, stride=1),
+        self.conv = torch.nn.ConvTranspose2d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            stride=2,
+            output_padding=1,
         )
+#         self.conv = torch.nn.Sequential(
+#             UpSampleConv(in_channels, scale=2),
+#             torch.nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, padding=1, stride=1),
+#         )
         self.conv2 = ResidualBlock(out_channels, out_channels)
         # self.uppool = torch.nn.Upsample(scale_factor=2)
 
